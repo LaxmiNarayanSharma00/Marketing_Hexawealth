@@ -1090,8 +1090,18 @@ async def _do_repost(page: Page, card: Locator) -> tuple[bool, str]:
     return False, "Repost menu not found"
 
 
-async def engage_post(page: Page, post: LatestPost) -> EngageResult:
-    """Like → comment Insightful → repost on the card that owns the action bar."""
+async def engage_post(
+    page: Page,
+    post: LatestPost,
+    *,
+    actions: set[str] | None = None,
+) -> EngageResult:
+    """Run selected actions (like / comment / repost) on the post's action bar."""
+    wanted = {a.strip().lower() for a in (actions or {"like", "comment", "repost"})}
+    wanted &= {"like", "comment", "repost"}
+    if not wanted:
+        return EngageResult(False, "error", "No actions selected")
+
     card = await _card_for_post(page, post)
     if card is None and not post.post_urn.lower().startswith("sdui:"):
         main = page.locator(
@@ -1115,50 +1125,36 @@ async def engage_post(page: Page, post: LatestPost) -> EngageResult:
 
     liked = commented = reposted = False
     details: list[str] = []
+    failed = False
 
-    ok, detail = await _do_like(page, card)
-    liked = ok
-    details.append(f"like={detail}")
-    if not ok:
-        return EngageResult(
-            False, "error", "; ".join(details), liked=liked
-        )
-    await _pause(0.8, 1.4)
+    if "like" in wanted:
+        ok, detail = await _do_like(page, card)
+        liked = ok
+        details.append(f"like={detail}")
+        if not ok:
+            failed = True
+        await _pause(0.8, 1.4)
+        card = await _card_for_post(page, post) or card
 
-    # Re-find card after DOM refresh from like
-    card = await _card_for_post(page, post) or card
+    if "comment" in wanted:
+        ok, detail = await _do_comment(page, card, COMMENT_TEXT)
+        commented = ok
+        details.append(f"comment={detail}")
+        if not ok:
+            failed = True
+        await _pause(0.8, 1.4)
+        card = await _card_for_post(page, post) or card
 
-    ok, detail = await _do_comment(page, card, COMMENT_TEXT)
-    commented = ok
-    details.append(f"comment={detail}")
-    if not ok:
-        return EngageResult(
-            False,
-            "error",
-            "; ".join(details),
-            liked=liked,
-            commented=commented,
-        )
-    await _pause(0.8, 1.4)
-
-    card = await _card_for_post(page, post) or card
-
-    ok, detail = await _do_repost(page, card)
-    reposted = ok
-    details.append(f"repost={detail}")
-    if not ok:
-        return EngageResult(
-            False,
-            "error",
-            "; ".join(details),
-            liked=liked,
-            commented=commented,
-            reposted=reposted,
-        )
+    if "repost" in wanted:
+        ok, detail = await _do_repost(page, card)
+        reposted = ok
+        details.append(f"repost={detail}")
+        if not ok:
+            failed = True
 
     return EngageResult(
-        True,
-        "done",
+        not failed,
+        "done" if not failed else "error",
         "; ".join(details),
         liked=liked,
         commented=commented,

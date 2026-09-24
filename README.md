@@ -83,12 +83,13 @@ Open http://127.0.0.1:5173
 | GET | `/api/profiles` | List scraped profiles |
 | GET | `/api/schedules` | List schedule mappings |
 | POST | `/api/schedules/company-people` | Create Type 1 daily schedule |
-| POST | `/api/schedules/build-connection` | Create Type 2 daily schedule |
+| POST | `/api/schedules/brand-engage` | Create Type 3 daily schedule |
 | PATCH | `/api/schedules/{id}` | Update mapping |
 | POST | `/api/schedules/{id}/start` | Enable mapping |
 | POST | `/api/schedules/{id}/pause` | Pause mapping |
 | DELETE | `/api/schedules/{id}` | Remove mapping |
 | GET | `/api/audiences` | Audiences for Build Connection |
+| GET | `/api/brand-sources` | Fixed brand audiences + actions |
 
 ### Source models
 

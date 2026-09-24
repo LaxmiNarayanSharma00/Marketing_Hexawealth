@@ -49,9 +49,15 @@ from automations_store import (
 )
 from company_people_job import run_company_people_fetch
 from build_connection_job import run_build_connection
-from brand_engage_job import run_brand_engage
+from brand_engage_job import (
+    ENGAGE_SOURCES,
+    normalize_actions,
+    resolve_sources,
+    run_brand_engage,
+)
 from profiles_store import list_profiles
 from schedules_store import (
+    KIND_BRAND_ENGAGE as SCHEDULE_KIND_BRAND_ENGAGE,
     KIND_BUILD_CONNECTION as SCHEDULE_KIND_BUILD_CONNECTION,
     KIND_COMPANY_PEOPLE as SCHEDULE_KIND_COMPANY_PEOPLE,
     create_schedule,
@@ -325,6 +331,102 @@ async def _scheduler_start_build_connection(**kwargs: Any) -> dict[str, Any] | N
         return None
 
 
+async def _start_brand_engage(
+    *,
+    session_name: str,
+    source_ids: list[str] | None = None,
+    actions: list[str] | None = None,
+    schedule_id: str | None = None,
+    local_date: str | None = None,
+    headless: bool = False,
+    raise_on_busy: bool = True,
+) -> dict[str, Any] | None:
+    global _running_automation_id
+
+    session = get_session(session_name)
+    if not session:
+        raise ValueError("session not found")
+    cookies = (session.get("storage_state") or {}).get("cookies") or []
+    if not cookies:
+        raise ValueError("session is not logged in — complete Phase 1 login first")
+
+    sources = resolve_sources(source_ids=source_ids or None)
+    action_list = normalize_actions(actions)
+
+    if _automation_lock.locked() or _running_automation_id:
+        if raise_on_busy:
+            raise RuntimeError("another automation is already running")
+        return None
+
+    labels = ", ".join(s["label"] for s in sources)
+    trigger = "schedule" if schedule_id else "manual"
+    run = create_run(
+        kind=AUTOMATION_KIND_BRAND_ENGAGE,
+        session_name=session_name,
+        company=f"Brand Engage · {len(sources)} audience(s)",
+        source_id=",".join(s["id"] for s in sources),
+        source_link=labels,
+        max_connections=0,
+        max_requests=0,
+        schedule_id=schedule_id,
+        trigger=trigger,
+    )
+    _running_automation_id = run["id"]
+
+    if schedule_id and local_date:
+        mark_fired(schedule_id, local_date=local_date, run_id=run["id"])
+
+    async def _guarded() -> None:
+        global _running_automation_id
+        async with _automation_lock:
+            try:
+                await run_brand_engage(
+                    run_id=run["id"],
+                    session_name=session_name,
+                    source_ids=[s["id"] for s in sources],
+                    actions=action_list,
+                    headless=headless,
+                )
+                if schedule_id:
+                    final = get_run_public(run["id"])
+                    status = (final or {}).get("status") or "done"
+                    mark_run_result(
+                        schedule_id,
+                        status=status,
+                        error=(final or {}).get("error"),
+                    )
+            except Exception as exc:
+                update_run(run["id"], status="error", error=str(exc))
+                from automations_store import append_log
+
+                append_log(run["id"], f"Failed: {exc}")
+                if schedule_id:
+                    mark_run_result(schedule_id, status="error", error=str(exc))
+            finally:
+                _running_automation_id = None
+
+    asyncio.create_task(_guarded())
+    return run
+
+
+async def _scheduler_start_brand_engage(**kwargs: Any) -> dict[str, Any] | None:
+    try:
+        return await _start_brand_engage(raise_on_busy=False, **kwargs)
+    except ValueError as exc:
+        schedule_id = kwargs.get("schedule_id")
+        local_date = kwargs.get("local_date")
+        if schedule_id:
+            fields: dict[str, Any] = {
+                "last_run_status": "error",
+                "last_error": str(exc),
+            }
+            if local_date:
+                fields["fired_on_date"] = local_date
+            update_schedule(schedule_id, **fields)
+        logger.warning("Scheduled brand engage skipped: %s", exc)
+        return None
+
+
 def _backfill_profile_source_ids() -> int:
     """Attach source_id to older profiles that only have source_company."""
     from profiles_store import DATA_DIR as profiles_dir, ensure_dir as ensure_profiles
@@ -367,6 +469,7 @@ async def lifespan(_app: FastAPI):
     _scheduler = AutomationScheduler(
         start_company_people=_scheduler_start_company_people,
         start_build_connection=_scheduler_start_build_connection,
+        start_brand_engage=_scheduler_start_brand_engage,
     )
     _scheduler.start()
     try:
@@ -460,12 +563,43 @@ class CreateBuildConnectionScheduleBody(BaseModel):
     enabled: bool = True
 
 
+class ActivateBrandEngageBody(BaseModel):
+    """Type 3 — engage latest posts for selected brand audiences + actions."""
+
+    session_name: str = Field(..., min_length=1)
+    source_ids: list[str] = Field(
+        default_factory=list,
+        description="Brand source ids; empty = all",
+    )
+    actions: list[str] = Field(
+        default_factory=lambda: ["like", "comment", "repost"],
+        description="Subset of like, comment, repost",
+    )
+
+
+class CreateBrandEngageScheduleBody(BaseModel):
+    """Daily Brand Engage schedule: session + audiences + actions + local time."""
+
+    session_name: str = Field(..., min_length=1)
+    source_ids: list[str] = Field(
+        default_factory=list,
+        description="Brand source ids; empty = all four",
+    )
+    actions: list[str] = Field(
+        default_factory=lambda: ["like", "comment", "repost"],
+    )
+    run_time: str = Field(default="11:00", description="Local HH:MM (24h)")
+    enabled: bool = True
+
+
 class UpdateScheduleBody(BaseModel):
     session_name: str | None = Field(default=None, min_length=1)
     source_id: str | None = Field(default=None, min_length=1)
-    max_profiles: int | None = Field(default=None, ge=1, le=100)
+    max_profiles: int | None = Field(default=None, ge=0, le=100)
     run_time: str | None = None
     enabled: bool | None = None
+    source_ids: list[str] | None = None
+    actions: list[str] | None = None
 
 
 @app.get("/api/health")
@@ -721,6 +855,42 @@ async def api_create_build_connection_schedule(
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.post("/api/schedules/brand-engage")
+async def api_create_brand_engage_schedule(
+    body: CreateBrandEngageScheduleBody,
+) -> dict:
+    session = get_session(body.session_name)
+    if not session:
+        raise HTTPException(404, "session not found")
+    cookies = (session.get("storage_state") or {}).get("cookies") or []
+    if not cookies:
+        raise HTTPException(
+            400, "session is not logged in — complete Phase 1 login first"
+        )
+    try:
+        sources = resolve_sources(source_ids=body.source_ids or None)
+        actions = normalize_actions(body.actions)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    labels = ", ".join(s["label"] for s in sources)
+    try:
+        return create_schedule(
+            kind=SCHEDULE_KIND_BRAND_ENGAGE,
+            session_name=body.session_name,
+            source_id="",
+            company=labels,
+            source_link="",
+            max_profiles=0,
+            run_time=body.run_time,
+            enabled=body.enabled,
+            source_ids=[s["id"] for s in sources],
+            actions=actions,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.patch("/api/schedules/{schedule_id}")
 async def api_update_schedule(schedule_id: str, body: UpdateScheduleBody) -> dict:
     existing = get_schedule_public(schedule_id)
@@ -753,6 +923,18 @@ async def api_update_schedule(schedule_id: str, body: UpdateScheduleBody) -> dic
         fields["run_time"] = body.run_time
     if body.enabled is not None:
         fields["enabled"] = body.enabled
+    if body.source_ids is not None:
+        try:
+            sources = resolve_sources(source_ids=body.source_ids or None)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        fields["source_ids"] = [s["id"] for s in sources]
+        fields["company"] = ", ".join(s["label"] for s in sources)
+    if body.actions is not None:
+        try:
+            fields["actions"] = normalize_actions(body.actions)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     try:
         updated = update_schedule(schedule_id, **fields)
@@ -807,49 +989,32 @@ async def api_activate_build_connection(body: ActivateBuildConnectionBody) -> di
 
 
 @app.post("/api/automations/brand-engage")
-async def api_activate_brand_engage() -> dict:
-    """Type 3 — like, comment Insightful, repost latest posts for every session."""
-    global _running_automation_id
-
-    logged_in = [
-        s
-        for s in list_sessions()
-        if s.get("has_storage_state")
-    ]
-    if not logged_in:
-        raise HTTPException(
-            400, "no logged-in sessions — complete Phase 1 login first"
+async def api_activate_brand_engage(body: ActivateBrandEngageBody) -> dict:
+    """Type 3 — like / comment / repost latest posts for one session."""
+    try:
+        run = await _start_brand_engage(
+            session_name=body.session_name,
+            source_ids=body.source_ids or None,
+            actions=body.actions,
+            headless=False,
+            raise_on_busy=True,
         )
-
-    if _automation_lock.locked() or _running_automation_id:
-        raise HTTPException(409, "another automation is already running")
-
-    run = create_run(
-        kind=AUTOMATION_KIND_BRAND_ENGAGE,
-        session_name="all",
-        company="Brand Engage",
-        source_id="",
-        source_link="",
-        max_connections=0,
-        max_requests=0,
-    )
-    _running_automation_id = run["id"]
-
-    async def _guarded() -> None:
-        global _running_automation_id
-        async with _automation_lock:
-            try:
-                await run_brand_engage(run_id=run["id"], headless=False)
-            except Exception as exc:
-                update_run(run["id"], status="error", error=str(exc))
-                from automations_store import append_log
-
-                append_log(run["id"], f"Failed: {exc}")
-            finally:
-                _running_automation_id = None
-
-    asyncio.create_task(_guarded())
+    except ValueError as exc:
+        msg = str(exc)
+        code = 404 if "not found" in msg.lower() else 400
+        raise HTTPException(code, msg) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    assert run is not None
     return run
+
+
+@app.get("/api/brand-sources")
+async def api_list_brand_sources() -> dict:
+    return {
+        "sources": ENGAGE_SOURCES,
+        "actions": ["like", "comment", "repost"],
+    }
 
 
 @app.get("/api/profiles")

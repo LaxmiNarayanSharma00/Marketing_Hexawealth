@@ -1,7 +1,8 @@
 """File-backed automation schedule mappings.
 
-Each schedule maps a logged-in session → a source for a given automation kind,
-with a daily local run time, profile/count limit, and pause/start state.
+Supports:
+  - company_people_fetch / build_connection: session → source, max, daily time
+  - brand_engage: audiences (brand sources) + actions + daily time (all sessions)
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "schedules"
 
 KIND_COMPANY_PEOPLE = "company_people_fetch"
 KIND_BUILD_CONNECTION = "build_connection"
+KIND_BRAND_ENGAGE = "brand_engage"
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
@@ -52,6 +54,8 @@ def public_view(doc: dict[str, Any]) -> dict[str, Any]:
         "company": doc.get("company", ""),
         "source_link": doc.get("source_link", ""),
         "max_profiles": int(doc.get("max_profiles") or 0),
+        "source_ids": list(doc.get("source_ids") or []),
+        "actions": list(doc.get("actions") or []),
         "run_time": doc.get("run_time", "09:00"),
         "enabled": bool(doc.get("enabled", True)),
         "last_run_at": doc.get("last_run_at"),
@@ -91,16 +95,20 @@ def get_schedule_public(schedule_id: str) -> dict[str, Any] | None:
 def create_schedule(
     *,
     kind: str,
-    session_name: str,
-    source_id: str,
+    session_name: str = "",
+    source_id: str = "",
     company: str = "",
     source_link: str = "",
     max_profiles: int = 10,
     run_time: str = "09:00",
     enabled: bool = True,
+    source_ids: list[str] | None = None,
+    actions: list[str] | None = None,
 ) -> dict[str, Any]:
     ensure_dir()
-    if max_profiles < 1 or max_profiles > 100:
+    if kind == KIND_BRAND_ENGAGE:
+        max_profiles = 0
+    elif max_profiles < 1 or max_profiles > 100:
         raise ValueError("max_profiles must be between 1 and 100")
     run_time = normalize_run_time(run_time)
     schedule_id = str(uuid.uuid4())
@@ -112,6 +120,8 @@ def create_schedule(
         "company": company,
         "source_link": source_link,
         "max_profiles": max_profiles,
+        "source_ids": list(source_ids or []),
+        "actions": list(actions or []),
         "run_time": run_time,
         "enabled": enabled,
         "last_run_at": None,
@@ -134,9 +144,13 @@ def update_schedule(schedule_id: str, **fields: Any) -> dict[str, Any] | None:
         fields["run_time"] = normalize_run_time(str(fields["run_time"]))
     if "max_profiles" in fields and fields["max_profiles"] is not None:
         n = int(fields["max_profiles"])
-        if n < 1 or n > 100:
+        if doc.get("kind") != KIND_BRAND_ENGAGE and (n < 1 or n > 100):
             raise ValueError("max_profiles must be between 1 and 100")
         fields["max_profiles"] = n
+    if "source_ids" in fields and fields["source_ids"] is not None:
+        fields["source_ids"] = list(fields["source_ids"])
+    if "actions" in fields and fields["actions"] is not None:
+        fields["actions"] = list(fields["actions"])
     doc.update(fields)
     doc["updated_at"] = _now()
     _path(schedule_id).write_text(json.dumps(doc, indent=2), encoding="utf-8")

@@ -67,6 +67,8 @@ export type Schedule = {
   company: string
   source_link: string
   max_profiles: number
+  source_ids?: string[]
+  actions?: string[]
   run_time: string
   enabled: boolean
   last_run_at?: string | null
@@ -76,6 +78,12 @@ export type Schedule = {
   fired_on_date?: string | null
   created_at?: string
   updated_at?: string
+}
+
+export type BrandSource = {
+  id: string
+  label: string
+  url: string
 }
 
 export type Profile = {
@@ -213,11 +221,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  activateBrandEngage: () =>
+  activateBrandEngage: (body: {
+    session_name: string
+    source_ids?: string[]
+    actions?: string[]
+  }) =>
     request<AutomationRun>('/api/automations/brand-engage', {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify(body),
     }),
+  listBrandSources: () =>
+    request<{ sources: BrandSource[]; actions: string[] }>(
+      '/api/brand-sources',
+    ),
   listProfiles: (opts?: {
     source_company?: string
     source_id?: string
@@ -258,6 +274,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  createBrandEngageSchedule: (body: {
+    session_name: string
+    source_ids: string[]
+    actions: string[]
+    run_time: string
+    enabled?: boolean
+  }) =>
+    request<Schedule>('/api/schedules/brand-engage', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   updateSchedule: (
     id: string,
     body: {
@@ -266,6 +293,8 @@ export const api = {
       max_profiles?: number
       run_time?: string
       enabled?: boolean
+      source_ids?: string[]
+      actions?: string[]
     },
   ) =>
     request<Schedule>(`/api/schedules/${encodeURIComponent(id)}`, {

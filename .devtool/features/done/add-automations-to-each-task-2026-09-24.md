@@ -1,13 +1,13 @@
 ---
 id: "add-automations-to-each-task-2026-09-24"
-status: "in-progress"
+status: "done"
 priority: "high"
 assignee: null
 epic: null
 dueDate: null
 created: "2026-09-24T05:26:37.842Z"
-modified: "2026-09-24T06:20:00.000Z"
-completedAt: null
+modified: "2026-09-24T06:40:00.000Z"
+completedAt: "2026-09-24T06:40:00.000Z"
 labels: []
 order: "a0"
 ---
@@ -33,10 +33,11 @@ ForCompany Pageetch i am thinking
 
 3 Decide timing
 
-## Progress (2026-09-24)
+## Done (2026-09-24)
 
-- Company People Fetch: Manual + Schedule (session→source, max, daily time, pause/start)
-- Build Connection: Manual + Schedule with **audience** selection
-  - Profiles store `source_company` + `source_id` (audience) from who fetched them
-  - Connect filters candidates by that audience
-- Still TODO: Brand Engage schedules
+- Company People Fetch: Manual + Schedule (session→source, max, daily time)
+- Build Connection: Manual + Schedule with audience (source_id on profiles)
+- Brand Engage: Manual + Schedule with:
+  1. Time of run
+  2. Audience (any n of 4 brand sources, or Select all)
+  3. Actions (like / comment / repost — any n or all)

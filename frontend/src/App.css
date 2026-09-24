@@ -823,6 +823,86 @@ input {
   color: var(--err) !important;
 }
 
+.picker-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.picker-head > span {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.check-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+}
+
+.check-grid.actions-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.check-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.check-item input {
+  margin-top: 0.2rem;
+  accent-color: var(--accent);
+}
+
+.check-item span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.check-item strong {
+  font-size: 0.86rem;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.check-item em {
+  font-style: normal;
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .check-grid,
+  .check-grid.actions-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .soft-label {
   margin-left: 0.35rem;
   font-size: 0.72rem;

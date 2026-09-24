@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any
 
 from schedules_store import (
+    KIND_BRAND_ENGAGE,
     KIND_BUILD_CONNECTION,
     KIND_COMPANY_PEOPLE,
     get_schedule,
@@ -40,9 +41,11 @@ class AutomationScheduler:
         *,
         start_company_people: StartFn,
         start_build_connection: StartFn,
+        start_brand_engage: StartFn,
     ) -> None:
         self._start_company_people = start_company_people
         self._start_build_connection = start_build_connection
+        self._start_brand_engage = start_brand_engage
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
@@ -90,7 +93,11 @@ class AutomationScheduler:
 
         for row in list_schedules():
             kind = row.get("kind")
-            if kind not in (KIND_COMPANY_PEOPLE, KIND_BUILD_CONNECTION):
+            if kind not in (
+                KIND_COMPANY_PEOPLE,
+                KIND_BUILD_CONNECTION,
+                KIND_BRAND_ENGAGE,
+            ):
                 continue
             if not row.get("enabled"):
                 continue
@@ -112,7 +119,9 @@ class AutomationScheduler:
                 schedule_id,
                 fresh.get("kind"),
                 fresh.get("session_name"),
-                fresh.get("company") or fresh.get("source_id"),
+                fresh.get("company")
+                or fresh.get("source_ids")
+                or fresh.get("source_id"),
                 run_time,
             )
             try:
@@ -121,6 +130,15 @@ class AutomationScheduler:
                         session_name=fresh["session_name"],
                         source_id=fresh.get("source_id") or "",
                         max_requests=int(fresh.get("max_profiles") or 10),
+                        schedule_id=schedule_id,
+                        local_date=local_date,
+                        headless=True,
+                    )
+                elif fresh.get("kind") == KIND_BRAND_ENGAGE:
+                    run = await self._start_brand_engage(
+                        session_name=fresh.get("session_name") or "",
+                        source_ids=list(fresh.get("source_ids") or []),
+                        actions=list(fresh.get("actions") or []),
                         schedule_id=schedule_id,
                         local_date=local_date,
                         headless=True,

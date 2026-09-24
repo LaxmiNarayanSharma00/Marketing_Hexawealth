@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Any
+from typing import Any, Iterable
 
 from browser import BrowserManager
 from engage_actions import engage_post, find_latest_post
@@ -15,19 +15,80 @@ from automations_store import append_log, update_run
 
 logger = logging.getLogger(__name__)
 
+ALL_ACTIONS = ("like", "comment", "repost")
+
 # Fixed brand / founder feeds — latest post on each is engaged once per session.
-ENGAGE_SOURCES: list[tuple[str, str]] = [
-    ("Hexawealth", "https://www.linkedin.com/company/hexawealth/posts/"),
-    ("Abhinav Singhvi", "https://www.linkedin.com/in/abhinav-singhvi-1a429233/"),
-    (
-        "Abhinav Swaroop",
-        "https://www.linkedin.com/in/abhinav-swaroop-cfa-8002a015/",
-    ),
-    (
-        "Vinayak Gandhi",
-        "https://www.linkedin.com/in/vinayak-gandhi-cfa-b7559b194/",
-    ),
+ENGAGE_SOURCES: list[dict[str, str]] = [
+    {
+        "id": "hexawealth",
+        "label": "Hexawealth",
+        "url": "https://www.linkedin.com/company/hexawealth/posts/",
+    },
+    {
+        "id": "abhinav-singhvi",
+        "label": "Abhinav Singhvi",
+        "url": "https://www.linkedin.com/in/abhinav-singhvi-1a429233/",
+    },
+    {
+        "id": "abhinav-swaroop",
+        "label": "Abhinav Swaroop",
+        "url": "https://www.linkedin.com/in/abhinav-swaroop-cfa-8002a015/",
+    },
+    {
+        "id": "vinayak-gandhi",
+        "label": "Vinayak Gandhi",
+        "url": "https://www.linkedin.com/in/vinayak-gandhi-cfa-b7559b194/",
+    },
 ]
+
+_SOURCE_BY_URL = {s["url"].rstrip("/").lower(): s for s in ENGAGE_SOURCES}
+_SOURCE_BY_ID = {s["id"]: s for s in ENGAGE_SOURCES}
+
+
+def normalize_actions(actions: Iterable[str] | None) -> list[str]:
+    if not actions:
+        return list(ALL_ACTIONS)
+    out: list[str] = []
+    for a in actions:
+        key = (a or "").strip().lower()
+        if key in ALL_ACTIONS and key not in out:
+            out.append(key)
+    if not out:
+        raise ValueError("actions must include at least one of: like, comment, repost")
+    return out
+
+
+def resolve_sources(
+    source_ids: Iterable[str] | None = None,
+    source_urls: Iterable[str] | None = None,
+) -> list[dict[str, str]]:
+    """Resolve selected brand audiences. Empty selection → all four."""
+    if source_ids:
+        rows: list[dict[str, str]] = []
+        for sid in source_ids:
+            src = _SOURCE_BY_ID.get((sid or "").strip())
+            if not src:
+                raise ValueError(f"Unknown brand source id: {sid}")
+            if src not in rows:
+                rows.append(src)
+        return rows
+    if source_urls:
+        rows = []
+        for url in source_urls:
+            key = (url or "").strip().rstrip("/").lower()
+            src = _SOURCE_BY_URL.get(key)
+            if not src:
+                # Allow exact match with trailing slash variants already normalized.
+                for candidate in ENGAGE_SOURCES:
+                    if candidate["url"].rstrip("/").lower() == key:
+                        src = candidate
+                        break
+            if not src:
+                raise ValueError(f"Unknown brand source url: {url}")
+            if src not in rows:
+                rows.append(src)
+        return rows
+    return list(ENGAGE_SOURCES)
 
 
 def _logged_in_sessions() -> list[str]:
@@ -41,19 +102,41 @@ def _logged_in_sessions() -> list[str]:
 async def run_brand_engage(
     *,
     run_id: str,
+    session_name: str | None = None,
+    source_ids: list[str] | None = None,
+    source_urls: list[str] | None = None,
+    actions: list[str] | None = None,
     headless: bool = False,
 ) -> dict[str, Any]:
     async def log(msg: str) -> None:
         logger.info("[%s] %s", run_id[:8], msg)
         append_log(run_id, msg)
 
+    sources = resolve_sources(source_ids=source_ids, source_urls=source_urls)
+    action_list = normalize_actions(actions)
+    action_set = set(action_list)
+
     update_run(run_id, status="running", error=None)
     await log("Starting Brand Engage")
+    await log(f"Actions: {', '.join(action_list)}")
     await log(
-        "Actions per latest post: Like → comment “Insightful” → Repost"
+        "Audiences: " + ", ".join(s["label"] for s in sources)
     )
 
-    sessions = _logged_in_sessions()
+    all_logged_in = _logged_in_sessions()
+    if session_name and session_name != "all":
+        if session_name not in all_logged_in:
+            update_run(
+                run_id,
+                status="error",
+                error=f"Session '{session_name}' is not logged in.",
+            )
+            await log(f"Stopped — session {session_name} not logged in")
+            return {"sessions": 0, "engaged": 0, "skipped": 0, "failed": 0}
+        sessions = [session_name]
+    else:
+        sessions = all_logged_in
+
     if not sessions:
         update_run(
             run_id,
@@ -64,7 +147,7 @@ async def run_brand_engage(
         return {"sessions": 0, "engaged": 0, "skipped": 0, "failed": 0}
 
     await log(f"Sessions to run: {', '.join(sessions)}")
-    await log(f"Sources: {len(ENGAGE_SOURCES)}")
+    await log(f"Sources: {len(sources)}")
 
     engaged = 0
     skipped = 0
@@ -89,13 +172,15 @@ async def run_brand_engage(
             await asyncio.sleep(random.uniform(1.0, 1.8))
             url = browser.page.url or ""
             if any(x in url for x in ("checkpoint", "authwall", "login")):
-                failed += len(ENGAGE_SOURCES)
+                failed += len(sources)
                 await log(
                     "  STOPPED session — LinkedIn login/security wall. Re-login in Phase 1."
                 )
                 continue
 
-            for label, source_url in ENGAGE_SOURCES:
+            for src in sources:
+                label = src["label"]
+                source_url = src["url"]
                 total_pairs += 1
                 await log(f"  [{label}] Finding latest post…")
                 try:
@@ -118,7 +203,9 @@ async def run_brand_engage(
                         )
                         continue
 
-                    result = await engage_post(browser.page, post)
+                    result = await engage_post(
+                        browser.page, post, actions=action_set
+                    )
                     mark_engaged(
                         session_name=session_name,
                         post_urn=post.post_urn,
@@ -147,11 +234,13 @@ async def run_brand_engage(
 
     result = {
         "sessions": len(sessions),
-        "sources": len(ENGAGE_SOURCES),
+        "sources": len(sources),
         "pairs": total_pairs,
         "engaged": engaged,
         "skipped": skipped,
         "failed": failed,
+        "actions": action_list,
+        "source_ids": [s["id"] for s in sources],
     }
     update_run(run_id, status="done", result=result)
     await log(
