@@ -1,0 +1,30 @@
+# Python
+backend/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Sessions (cookies — never commit)
+data/sessions/*.json
+!data/sessions/.gitkeep
+
+# Sources
+data/sources/*.json
+!data/sources/.gitkeep
+
+# Automations + profiles + engagements
+data/automations/*.json
+!data/automations/.gitkeep
+data/profiles/*.json
+!data/profiles/.gitkeep
+data/engagements/*.json
+!data/engagements/.gitkeep
+
+# Env / OS
+.env
+.DS_Store
+*.log
