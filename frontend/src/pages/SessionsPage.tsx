@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import { api, pollLogin, type Session } from '../api'
 
 function initials(name: string) {
@@ -21,6 +21,26 @@ function formatWhen(iso?: string) {
   }
 }
 
+/** Accept raw Playwright state or { name?, storage_state } export wrapper. */
+function parseStoragePayload(raw: string): {
+  nameHint?: string
+  storageState: unknown
+} {
+  const parsed = JSON.parse(raw) as Record<string, unknown>
+  if (
+    parsed &&
+    typeof parsed === 'object' &&
+    parsed.storage_state &&
+    typeof parsed.storage_state === 'object'
+  ) {
+    return {
+      nameHint: typeof parsed.name === 'string' ? parsed.name : undefined,
+      storageState: parsed.storage_state,
+    }
+  }
+  return { storageState: parsed }
+}
+
 type Props = {
   onStats?: (ready: number, total: number) => void
 }
@@ -28,11 +48,14 @@ type Props = {
 export default function SessionsPage({ onStats }: Props) {
   const [sessions, setSessions] = useState<Session[]>([])
   const [name, setName] = useState('')
+  const [importName, setImportName] = useState('')
+  const [importJson, setImportJson] = useState('')
   const [busy, setBusy] = useState(false)
   const [busyName, setBusyName] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [info, setInfo] = useState('')
   const [logs, setLogs] = useState<string[]>([])
+  const fileRef = useRef<HTMLInputElement>(null)
 
   const refresh = async () => {
     const data = await api.listSessions()
@@ -56,7 +79,9 @@ export default function SessionsPage({ onStats }: Props) {
     try {
       await api.createSession(n)
       setName('')
-      setInfo(`Created “${n}”. Open Login to capture the LinkedIn session.`)
+      setInfo(
+        `Created “${n}”. Use Login, or Import session cookies below.`,
+      )
       await refresh()
     } catch (err: unknown) {
       setError(String((err as Error).message || err))
@@ -91,6 +116,70 @@ export default function SessionsPage({ onStats }: Props) {
     }
   }
 
+  const onExport = async (s: Session) => {
+    setError('')
+    setInfo('')
+    try {
+      const data = await api.exportStorageState(s.name)
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: 'application/json',
+      })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${s.name}-storage-state.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      setInfo(
+        `Exported “${s.name}” (${data.cookie_count} cookies). Upload that file on prod via Import.`,
+      )
+    } catch (err: unknown) {
+      setError(String((err as Error).message || err))
+    }
+  }
+
+  const onImportFile = async (file: File) => {
+    const text = await file.text()
+    setImportJson(text)
+    try {
+      const { nameHint } = parseStoragePayload(text)
+      if (nameHint && !importName.trim()) setImportName(nameHint)
+    } catch {
+      /* user can fix JSON in the textarea */
+    }
+  }
+
+  const onImport = async (e: FormEvent) => {
+    e.preventDefault()
+    const n = importName.trim()
+    if (!n) {
+      setError('Enter a session name for the import.')
+      return
+    }
+    if (!importJson.trim()) {
+      setError('Paste storage-state JSON or choose an export file.')
+      return
+    }
+    setBusy(true)
+    setError('')
+    setInfo('')
+    try {
+      const { storageState } = parseStoragePayload(importJson)
+      const saved = await api.importStorageState(n, storageState)
+      setImportJson('')
+      setImportName('')
+      if (fileRef.current) fileRef.current.value = ''
+      setInfo(
+        `Imported “${saved.name}” · ${saved.cookie_count} cookies. Ready for automation.`,
+      )
+      await refresh()
+    } catch (err: unknown) {
+      setError(String((err as Error).message || err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const onDelete = async (s: Session) => {
     if (!confirm(`Delete session “${s.name}”? This cannot be undone.`)) return
     setError('')
@@ -112,8 +201,8 @@ export default function SessionsPage({ onStats }: Props) {
           <p className="phase">Phase 01 · Authentication</p>
           <h1>LinkedIn sessions</h1>
           <p className="lede">
-            Sign in once in a real browser. We store the session cookies so later
-            stages can act as this account.
+            Sign in once in a real browser, or import cookies captured elsewhere.
+            We store the session so later stages can act as this account.
           </p>
         </div>
         <div className="topbar-meta">
@@ -168,6 +257,65 @@ export default function SessionsPage({ onStats }: Props) {
       <section className="panel">
         <div className="panel-head">
           <div>
+            <h2>Import session cookies</h2>
+            <p>
+              Paste or upload a Playwright storage-state JSON (from Export on
+              another machine). Creates the session if it does not exist.
+            </p>
+          </div>
+        </div>
+        <form className="import-form" onSubmit={onImport}>
+          <label className="field">
+            <span>Session name</span>
+            <input
+              value={importName}
+              onChange={(e) => setImportName(e.target.value)}
+              placeholder="e.g. li-primary"
+              autoComplete="off"
+              required
+            />
+          </label>
+          <label className="field">
+            <span>Export file</span>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/json,.json"
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) void onImportFile(f)
+              }}
+            />
+          </label>
+          <label className="field field-span-2">
+            <span>Storage state JSON</span>
+            <textarea
+              value={importJson}
+              onChange={(e) => setImportJson(e.target.value)}
+              placeholder='{"cookies":[{"name":"li_at","value":"…","domain":".linkedin.com","path":"/"}],"origins":[]}'
+              rows={6}
+              spellCheck={false}
+            />
+          </label>
+          <div className="import-actions">
+            <button
+              type="submit"
+              className="btn primary"
+              disabled={busy || !importName.trim() || !importJson.trim()}
+            >
+              Import cookies
+            </button>
+            <p className="field-hint">
+              Local → prod: Export here after Login, then open this UI on prod and
+              Import the same file.
+            </p>
+          </div>
+        </form>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <div>
             <h2>Saved sessions</h2>
             <p>Authenticated accounts available for future automation stages.</p>
           </div>
@@ -178,7 +326,9 @@ export default function SessionsPage({ onStats }: Props) {
           <div className="empty">
             <div className="empty-mark">in</div>
             <p>No sessions yet</p>
-            <span>Create one above, then click Login to capture cookies.</span>
+            <span>
+              Create one above and Login, or Import cookies from another machine.
+            </span>
           </div>
         ) : (
           <ul className="session-list">
@@ -223,6 +373,17 @@ export default function SessionsPage({ onStats }: Props) {
                           ? 'Re-login'
                           : 'Login'}
                     </button>
+                    {s.has_storage_state && (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy}
+                        onClick={() => onExport(s)}
+                        title="Download cookies for prod import"
+                      >
+                        Export
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn ghost"

@@ -434,10 +434,53 @@ input {
 }
 
 .field input:focus,
-.field select:focus {
+.field select:focus,
+.field textarea:focus {
   background-color: #fff;
   border-color: #8fb0e8;
   box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.15);
+}
+
+.field textarea {
+  width: 100%;
+  padding: 0.78rem 0.9rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink);
+  outline: none;
+  resize: vertical;
+  min-height: 8rem;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.field input[type='file'] {
+  padding: 0.55rem 0.7rem;
+  font-size: 0.84rem;
+}
+
+.import-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.9rem 1rem;
+  align-items: end;
+}
+
+.import-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.25rem;
+}
+
+@media (max-width: 720px) {
+  .import-form {
+    grid-template-columns: 1fr;
+  }
 }
 
 .field input::placeholder {
