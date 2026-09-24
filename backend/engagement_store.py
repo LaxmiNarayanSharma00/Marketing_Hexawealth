@@ -2,26 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "engagements"
+from db import ensure_db, get_db, now
 
 _ACTIVITY_URN_RE = re.compile(
     r"(urn:li:(?:activity|ugcPost|share):\d+)", re.I
 )
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def ensure_dir() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_db()
 
 
 def canonicalize_post_urn(urn_or_url: str) -> str:
@@ -33,29 +25,40 @@ def canonicalize_post_urn(urn_or_url: str) -> str:
     m = _ACTIVITY_URN_RE.search(raw)
     if m:
         return m.group(1).lower()
-    # Fallback stable key from URL path
     cleaned = raw.split("?")[0].split("#")[0].rstrip("/").lower()
     return cleaned
 
 
-def _key(session_name: str, post_urn: str) -> str:
-    sess = re.sub(r"[^a-zA-Z0-9_-]+", "-", (session_name or "").strip())[:40]
-    urn = canonicalize_post_urn(post_urn)
-    digest = hashlib.sha1(f"{sess}|{urn}".encode()).hexdigest()[:12]
-    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", urn)[:60].strip("-")
-    return f"{sess}__{slug}__{digest}"
+def _row_to_doc(row: Any) -> dict[str, Any]:
+    return {
+        "session_name": row["session_name"],
+        "post_urn": row["post_urn"],
+        "post_url": row["post_url"] or "",
+        "source_url": row["source_url"] or "",
+        "liked": bool(row["liked"]),
+        "commented": bool(row["commented"]),
+        "reposted": bool(row["reposted"]),
+        "done": bool(row["done"]),
+        "note": row["note"] or "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 def has_engaged(session_name: str, post_urn: str) -> bool:
-    ensure_dir()
-    path = DATA_DIR / f"{_key(session_name, post_urn)}.json"
-    if not path.exists():
+    ensure_db()
+    urn = canonicalize_post_urn(post_urn)
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT done FROM engagements
+            WHERE session_name = ? AND post_urn = ?
+            """,
+            (session_name, urn),
+        ).fetchone()
+    if not row:
         return False
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    return bool(doc.get("done"))
+    return bool(row["done"])
 
 
 def mark_engaged(
@@ -69,42 +72,94 @@ def mark_engaged(
     reposted: bool = False,
     note: str = "",
 ) -> dict[str, Any]:
-    ensure_dir()
+    ensure_db()
     urn = canonicalize_post_urn(post_urn)
-    path = DATA_DIR / f"{_key(session_name, urn)}.json"
-    done = bool(liked and commented and reposted)
-    doc = {
+    ts = now()
+    with get_db() as conn:
+        prev = conn.execute(
+            """
+            SELECT * FROM engagements
+            WHERE session_name = ? AND post_urn = ?
+            """,
+            (session_name, urn),
+        ).fetchone()
+        if prev:
+            liked_v = bool(prev["liked"] or liked)
+            commented_v = bool(prev["commented"] or commented)
+            reposted_v = bool(prev["reposted"] or reposted)
+            done = bool(liked_v and commented_v and reposted_v)
+            created = prev["created_at"] or ts
+            conn.execute(
+                """
+                UPDATE engagements SET
+                    post_url = ?, source_url = ?, liked = ?, commented = ?,
+                    reposted = ?, done = ?, note = ?, updated_at = ?
+                WHERE session_name = ? AND post_urn = ?
+                """,
+                (
+                    post_url or prev["post_url"] or "",
+                    source_url or prev["source_url"] or "",
+                    1 if liked_v else 0,
+                    1 if commented_v else 0,
+                    1 if reposted_v else 0,
+                    1 if done else 0,
+                    note or prev["note"] or "",
+                    ts,
+                    session_name,
+                    urn,
+                ),
+            )
+        else:
+            liked_v = liked
+            commented_v = commented
+            reposted_v = reposted
+            done = bool(liked_v and commented_v and reposted_v)
+            created = ts
+            conn.execute(
+                """
+                INSERT INTO engagements(
+                    session_name, post_urn, post_url, source_url, liked, commented,
+                    reposted, done, note, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_name,
+                    urn,
+                    post_url,
+                    source_url,
+                    1 if liked_v else 0,
+                    1 if commented_v else 0,
+                    1 if reposted_v else 0,
+                    1 if done else 0,
+                    note,
+                    ts,
+                    ts,
+                ),
+            )
+    return {
         "session_name": session_name,
         "post_urn": urn,
         "post_url": post_url,
         "source_url": source_url,
-        "liked": liked,
-        "commented": commented,
-        "reposted": reposted,
+        "liked": liked_v,
+        "commented": commented_v,
+        "reposted": reposted_v,
         "done": done,
         "note": note,
-        "updated_at": _now(),
+        "created_at": created,
+        "updated_at": ts,
     }
-    if path.exists():
-        try:
-            prev = json.loads(path.read_text(encoding="utf-8"))
-            doc["created_at"] = prev.get("created_at") or _now()
-            # Preserve prior success flags
-            doc["liked"] = bool(prev.get("liked") or liked)
-            doc["commented"] = bool(prev.get("commented") or commented)
-            doc["reposted"] = bool(prev.get("reposted") or reposted)
-            doc["done"] = bool(doc["liked"] and doc["commented"] and doc["reposted"])
-        except Exception:
-            doc["created_at"] = _now()
-    else:
-        doc["created_at"] = _now()
-    path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    return doc
 
 
 def get_engagement(session_name: str, post_urn: str) -> dict[str, Any] | None:
-    ensure_dir()
-    path = DATA_DIR / f"{_key(session_name, post_urn)}.json"
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    ensure_db()
+    urn = canonicalize_post_urn(post_urn)
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM engagements
+            WHERE session_name = ? AND post_urn = ?
+            """,
+            (session_name, urn),
+        ).fetchone()
+    return _row_to_doc(row) if row else None

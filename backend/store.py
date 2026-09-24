@@ -1,43 +1,50 @@
-"""File-backed LinkedIn session store (Playwright storage_state)."""
+"""SQLite-backed LinkedIn session store (Playwright storage_state)."""
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "sessions"
+from db import dumps, ensure_db, get_db, loads, now
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _path(name: str) -> Path:
+def _safe_name(name: str) -> str:
     safe = "".join(c for c in name.strip() if c.isalnum() or c in "-_").strip("-_")
     if not safe:
         raise ValueError("invalid session name")
-    return DATA_DIR / f"{safe}.json"
+    return safe
 
 
 def ensure_dir() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_db()
+
+
+def _row_to_doc(row: Any) -> dict[str, Any]:
+    return {
+        "name": row["name"],
+        "status": row["status"] or "missing",
+        "storage_state": loads(row["storage_state"], {}),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 def list_sessions() -> list[dict[str, Any]]:
-    ensure_dir()
-    rows: list[dict[str, Any]] = []
-    for path in sorted(DATA_DIR.glob("*.json")):
-        rows.append(public_view(json.loads(path.read_text(encoding="utf-8"))))
-    return rows
+    ensure_db()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sessions ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+    return [public_view(_row_to_doc(r)) for r in rows]
 
 
 def get_session(name: str) -> dict[str, Any] | None:
-    path = _path(name)
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    ensure_db()
+    safe = _safe_name(name)
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM sessions WHERE name = ?", (safe,)
+        ).fetchone()
+    return _row_to_doc(row) if row else None
 
 
 def get_session_public(name: str) -> dict[str, Any] | None:
@@ -46,50 +53,87 @@ def get_session_public(name: str) -> dict[str, Any] | None:
 
 
 def create_session(name: str) -> dict[str, Any]:
-    ensure_dir()
-    path = _path(name)
-    if path.exists():
-        raise FileExistsError(f"session '{name}' already exists")
-    doc = {
-        "name": path.stem,
-        "status": "missing",
-        "storage_state": {},
-        "created_at": _now(),
-        "updated_at": _now(),
-    }
-    path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    return public_view(doc)
+    ensure_db()
+    safe = _safe_name(name)
+    ts = now()
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM sessions WHERE name = ?", (safe,)
+        ).fetchone()
+        if existing:
+            raise FileExistsError(f"session '{name}' already exists")
+        conn.execute(
+            """
+            INSERT INTO sessions(name, status, storage_state, created_at, updated_at)
+            VALUES (?, 'missing', '{}', ?, ?)
+            """,
+            (safe, ts, ts),
+        )
+    return public_view(
+        {
+            "name": safe,
+            "status": "missing",
+            "storage_state": {},
+            "created_at": ts,
+            "updated_at": ts,
+        }
+    )
 
 
 def save_storage_state(name: str, storage_state: dict[str, Any]) -> dict[str, Any]:
-    ensure_dir()
-    path = _path(name)
-    if path.exists():
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    else:
-        doc = {"name": path.stem, "created_at": _now()}
-    doc["storage_state"] = storage_state
-    doc["status"] = "present"
-    doc["updated_at"] = _now()
-    path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    return public_view(doc)
+    ensure_db()
+    safe = _safe_name(name)
+    ts = now()
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM sessions WHERE name = ?", (safe,)
+        ).fetchone()
+        if row:
+            created = row["created_at"]
+            conn.execute(
+                """
+                UPDATE sessions
+                SET storage_state = ?, status = 'present', updated_at = ?
+                WHERE name = ?
+                """,
+                (dumps(storage_state), ts, safe),
+            )
+        else:
+            created = ts
+            conn.execute(
+                """
+                INSERT INTO sessions(name, status, storage_state, created_at, updated_at)
+                VALUES (?, 'present', ?, ?, ?)
+                """,
+                (safe, dumps(storage_state), ts, ts),
+            )
+    return public_view(
+        {
+            "name": safe,
+            "status": "present",
+            "storage_state": storage_state,
+            "created_at": created,
+            "updated_at": ts,
+        }
+    )
 
 
 def set_status(name: str, status: str) -> None:
-    doc = get_session(name)
-    if not doc:
-        return
-    doc["status"] = status
-    doc["updated_at"] = _now()
-    _path(name).write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    ensure_db()
+    safe = _safe_name(name)
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE sessions SET status = ?, updated_at = ? WHERE name = ?",
+            (status, now(), safe),
+        )
 
 
 def delete_session(name: str) -> bool:
-    path = _path(name)
-    if not path.exists():
-        return False
-    path.unlink()
-    return True
+    ensure_db()
+    safe = _safe_name(name)
+    with get_db() as conn:
+        cur = conn.execute("DELETE FROM sessions WHERE name = ?", (safe,))
+        return cur.rowcount > 0
 
 
 def load_storage_state(name: str) -> dict[str, Any]:

@@ -1,4 +1,4 @@
-"""File-backed sources store.
+"""SQLite-backed sources store.
 
 Phase 2 source kinds:
   1. Company Peoples — LinkedIn company /people/ URLs
@@ -8,15 +8,12 @@ Phase 2 source kinds:
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, unquote
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "sources"
+from db import ensure_db, get_db, now
 
 SOURCE_KIND_COMPANY_PEOPLES = "company_peoples"
 SOURCE_KIND_INFLUENCER = "influencer"
@@ -45,16 +42,8 @@ _SCHOOL_ALUMNI_RE = re.compile(
 )
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def ensure_dir() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _path(source_id: str) -> Path:
-    return DATA_DIR / f"{source_id}.json"
+    ensure_db()
 
 
 def _slug_to_title(slug: str) -> str:
@@ -106,7 +95,6 @@ def company_from_people_url(url: str) -> str:
     m = _SCHOOL_ALUMNI_RE.match(raw)
     if m:
         return _slug_to_title(m.group(2))
-    # Fallback: last meaningful path segment
     try:
         parts = [p for p in urlparse(raw).path.split("/") if p]
         skip = {"company", "school", "people", "alumni", "in", "www"}
@@ -127,6 +115,19 @@ def name_from_profile_url(url: str) -> str:
         return ""
 
 
+def _row_to_doc(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "source_kind": row["source_kind"],
+        "type": row["type"],
+        "company": row["company"] or "",
+        "link": row["link"] or "",
+        "use_case": row["use_case"] or "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 def public_view(doc: dict[str, Any]) -> dict[str, Any]:
     kind = doc.get("source_kind", SOURCE_KIND_COMPANY_PEOPLES)
     return {
@@ -143,28 +144,62 @@ def public_view(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_sources(*, source_kind: str | None = None) -> list[dict[str, Any]]:
-    ensure_dir()
-    rows: list[dict[str, Any]] = []
-    for path in sorted(DATA_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime):
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        if source_kind and doc.get("source_kind") != source_kind:
-            continue
-        rows.append(public_view(doc))
-    rows.reverse()
-    return rows
+    ensure_db()
+    with get_db() as conn:
+        if source_kind:
+            rows = conn.execute(
+                "SELECT * FROM sources WHERE source_kind = ? ORDER BY created_at DESC",
+                (source_kind,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM sources ORDER BY created_at DESC"
+            ).fetchall()
+    return [public_view(_row_to_doc(r)) for r in rows]
 
 
 def get_source(source_id: str) -> dict[str, Any] | None:
-    path = _path(source_id)
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    ensure_db()
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM sources WHERE id = ?", (source_id,)
+        ).fetchone()
+    return _row_to_doc(row) if row else None
 
 
 def _assert_unique_link(normalized: str, *, source_kind: str) -> None:
-    for existing in list_sources(source_kind=source_kind):
-        if existing["link"].rstrip("/").lower() == normalized.rstrip("/").lower():
+    ensure_db()
+    target = normalized.rstrip("/").lower()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT link FROM sources WHERE source_kind = ?",
+            (source_kind,),
+        ).fetchall()
+    for row in rows:
+        if (row["link"] or "").rstrip("/").lower() == target:
             raise FileExistsError(f"source already exists for {normalized}")
+
+
+def _insert_source(doc: dict[str, Any]) -> dict[str, Any]:
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO sources(
+                id, source_kind, type, company, link, use_case, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                doc["id"],
+                doc["source_kind"],
+                doc["type"],
+                doc["company"],
+                doc["link"],
+                doc["use_case"],
+                doc["created_at"],
+                doc["updated_at"],
+            ),
+        )
+    return public_view(doc)
 
 
 def create_company_peoples_source(
@@ -174,27 +209,26 @@ def create_company_peoples_source(
     type_: str = TYPE_INDIVIDUAL,
     use_case: str = USE_CASE_INCREASE_NETWORK,
 ) -> dict[str, Any]:
-    ensure_dir()
+    ensure_db()
     normalized = normalize_company_people_url(link)
     company_name = (company or "").strip() or company_from_people_url(normalized)
     if not company_name:
         raise ValueError("company is required")
     _assert_unique_link(normalized, source_kind=SOURCE_KIND_COMPANY_PEOPLES)
 
-    source_id = str(uuid.uuid4())
+    ts = now()
     doc = {
-        "id": source_id,
+        "id": str(uuid.uuid4()),
         "source_kind": SOURCE_KIND_COMPANY_PEOPLES,
         "type": (type_ or TYPE_INDIVIDUAL).strip().lower() or TYPE_INDIVIDUAL,
         "company": company_name,
         "link": normalized,
         "use_case": (use_case or USE_CASE_INCREASE_NETWORK).strip().lower()
         or USE_CASE_INCREASE_NETWORK,
-        "created_at": _now(),
-        "updated_at": _now(),
+        "created_at": ts,
+        "updated_at": ts,
     }
-    _path(source_id).write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    return public_view(doc)
+    return _insert_source(doc)
 
 
 def create_influencer_source(
@@ -205,27 +239,26 @@ def create_influencer_source(
     use_case: str = USE_CASE_INCREASE_VISIBILITY,
 ) -> dict[str, Any]:
     """Type 2 · Influencer. `company` stores the influencer's display name."""
-    ensure_dir()
+    ensure_db()
     normalized = normalize_profile_url(link)
     name = (company or "").strip() or name_from_profile_url(normalized)
     if not name:
         raise ValueError("name is required")
     _assert_unique_link(normalized, source_kind=SOURCE_KIND_INFLUENCER)
 
-    source_id = str(uuid.uuid4())
+    ts = now()
     doc = {
-        "id": source_id,
+        "id": str(uuid.uuid4()),
         "source_kind": SOURCE_KIND_INFLUENCER,
         "type": (type_ or TYPE_INFLUENCER).strip().lower() or TYPE_INFLUENCER,
         "company": name,
         "link": normalized,
         "use_case": (use_case or USE_CASE_INCREASE_VISIBILITY).strip().lower()
         or USE_CASE_INCREASE_VISIBILITY,
-        "created_at": _now(),
-        "updated_at": _now(),
+        "created_at": ts,
+        "updated_at": ts,
     }
-    _path(source_id).write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    return public_view(doc)
+    return _insert_source(doc)
 
 
 def create_individual_source(
@@ -236,32 +269,30 @@ def create_individual_source(
     use_case: str = USE_CASE_REACH_OUT,
 ) -> dict[str, Any]:
     """Type 3 · Individual. `company` stores the person's display name."""
-    ensure_dir()
+    ensure_db()
     normalized = normalize_profile_url(link)
     name = (company or "").strip() or name_from_profile_url(normalized)
     if not name:
         raise ValueError("name is required")
     _assert_unique_link(normalized, source_kind=SOURCE_KIND_INDIVIDUAL)
 
-    source_id = str(uuid.uuid4())
+    ts = now()
     doc = {
-        "id": source_id,
+        "id": str(uuid.uuid4()),
         "source_kind": SOURCE_KIND_INDIVIDUAL,
         "type": (type_ or TYPE_INDIVIDUAL).strip().lower() or TYPE_INDIVIDUAL,
         "company": name,
         "link": normalized,
         "use_case": (use_case or USE_CASE_REACH_OUT).strip().lower()
         or USE_CASE_REACH_OUT,
-        "created_at": _now(),
-        "updated_at": _now(),
+        "created_at": ts,
+        "updated_at": ts,
     }
-    _path(source_id).write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    return public_view(doc)
+    return _insert_source(doc)
 
 
 def delete_source(source_id: str) -> bool:
-    path = _path(source_id)
-    if not path.exists():
-        return False
-    path.unlink()
-    return True
+    ensure_db()
+    with get_db() as conn:
+        cur = conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+        return cur.rowcount > 0
