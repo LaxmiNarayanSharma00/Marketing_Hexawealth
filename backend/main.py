@@ -18,8 +18,10 @@ from store import (
     get_session,
     get_session_public,
     list_sessions,
+    load_storage_state,
     save_storage_state,
     set_status,
+    validate_storage_state,
 )
 from sources_store import (
     SOURCE_KIND_COMPANY_PEOPLES,
@@ -484,6 +486,25 @@ class CreateSessionBody(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
 
 
+class ImportStorageStateBody(BaseModel):
+    """Manual upload of Playwright storage_state (cookies + optional origins).
+
+    Use this to dump a session captured locally into another environment (e.g. prod)
+    without opening a headed browser on the target machine.
+    """
+
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="Session label; created if it does not exist",
+    )
+    storage_state: dict[str, Any] = Field(
+        ...,
+        description="Playwright storage_state JSON with a non-empty cookies array",
+    )
+
+
 class CreateCompanyPeoplesSourceBody(BaseModel):
     """Type 1 · Company Peoples — paste a company /people/ URL."""
 
@@ -646,6 +667,44 @@ async def api_login_status(name: str) -> dict:
         "error": job["error"],
         "session": get_session_public(name),
     }
+
+
+@app.get("/api/sessions/{name}/storage-state")
+async def api_export_storage_state(name: str) -> dict:
+    """Download full Playwright storage_state for transfer to another environment."""
+    if not get_session(name):
+        raise HTTPException(404, "session not found")
+    try:
+        state = load_storage_state(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {
+        "name": name,
+        "storage_state": state,
+        "cookie_count": len(state.get("cookies") or []),
+    }
+
+
+@app.put("/api/sessions/{name}/storage-state")
+async def api_import_storage_state_for_name(
+    name: str, body: dict[str, Any]
+) -> dict:
+    """Import cookies onto an existing or new session name (path param)."""
+    try:
+        state = validate_storage_state(body)
+        return save_storage_state(name, state)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/sessions/import")
+async def api_import_storage_state(body: ImportStorageStateBody) -> dict:
+    """Create-or-update a session from pasted/uploaded Playwright storage_state."""
+    try:
+        state = validate_storage_state(body.storage_state)
+        return save_storage_state(body.name, state)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 # —— Phase 2 · Sources ——

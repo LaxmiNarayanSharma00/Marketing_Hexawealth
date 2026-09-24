@@ -155,6 +155,25 @@ export const api = {
     request<LoginStatus>(
       `/api/sessions/${encodeURIComponent(name)}/login-status`,
     ),
+  exportStorageState: (name: string) =>
+    request<{
+      name: string
+      storage_state: { cookies: unknown[]; origins?: unknown[] }
+      cookie_count: number
+    }>(`/api/sessions/${encodeURIComponent(name)}/storage-state`),
+  importStorageState: (name: string, storageState: unknown) =>
+    request<Session>('/api/sessions/import', {
+      method: 'POST',
+      body: JSON.stringify({ name, storage_state: storageState }),
+    }),
+  putStorageState: (name: string, storageState: unknown) =>
+    request<Session>(
+      `/api/sessions/${encodeURIComponent(name)}/storage-state`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(storageState),
+      },
+    ),
 
   listSources: (sourceKind?: string) => {
     const q = sourceKind

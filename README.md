@@ -67,9 +67,12 @@ Open http://162.35.114.232:5173
 3. Sign in with email/password (prefer not Google SSO)
 4. When the feed/nav appears, cookies are saved automatically
 5. Session shows “Logged in” and is ready for later phases
-6. Open **Sources** → add Company Peoples URLs like
+6. **Prod without a browser:** on local, click **Export** on the session → download
+   `*-storage-state.json`. On the prod UI, open **Import session cookies**, pick the
+   same name, upload/paste the file, **Import cookies**.
+7. Open **Sources** → add Company Peoples URLs like
    `https://www.linkedin.com/company/google/people/`
-7. Open **Automations** → Type 1 Company People Fetch:
+8. Open **Automations** → Type 1 Company People Fetch:
    - **Manual** — pick session, company source, max → **Activate**
    - **Schedule** — add session→source mappings with daily local time,
      profile count, and Pause/Start; the API process fires them automatically
@@ -83,6 +86,9 @@ Open http://162.35.114.232:5173
 | DELETE | `/api/sessions/{name}` | Delete |
 | POST | `/api/sessions/{name}/login` | Start manual login |
 | GET | `/api/sessions/{name}/login-status` | Poll logs / result |
+| GET | `/api/sessions/{name}/storage-state` | Export full Playwright cookies JSON |
+| PUT | `/api/sessions/{name}/storage-state` | Import cookies onto `{name}` |
+| POST | `/api/sessions/import` | Create-or-update from `{ "name", "storage_state" }` |
 | GET | `/api/sources` | List sources |
 | POST | `/api/sources/company-peoples` | Add Company Peoples source |
 | POST | `/api/sources/influencer` | Add Influencer source |
