@@ -1,1 +1,15 @@
 http://162.35.114.232:6080/vnc.html
+
+
+
+!8xtjRsC   -- root paasword
+
+ssh root@162.35.114.232   for login
+
+
+
+!8xtjRsC   -- root paasword
+
+
+
+journalctl -u overnight-run.service -u overnight-run-backup.service --since "2026-09-03 15:20" --until "2026-09-03 15:40"

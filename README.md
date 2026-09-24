@@ -51,6 +51,15 @@ npm run dev
 
 Open http://127.0.0.1:5173
 
+On the **VPS** (API is on port **8001** because 8000 is used by another app):
+
+```bash
+cd /opt/hexawealth/frontend
+npm run dev:vps
+```
+
+Open http://162.35.114.232:5173
+
 ## Flow
 
 1. Create a session (e.g. `li-account-1`)
