@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
@@ -70,6 +69,7 @@ from schedules_store import (
     update_schedule,
 )
 from scheduler import AutomationScheduler
+from db import init_db
 
 
 logging.basicConfig(level=logging.INFO)
@@ -429,36 +429,26 @@ async def _scheduler_start_brand_engage(**kwargs: Any) -> dict[str, Any] | None:
 
 def _backfill_profile_source_ids() -> int:
     """Attach source_id to older profiles that only have source_company."""
-    from profiles_store import DATA_DIR as profiles_dir, ensure_dir as ensure_profiles
+    from profiles_store import backfill_source_ids
 
-    ensure_profiles()
     by_company: dict[str, str] = {}
     for src in list_sources(source_kind=SOURCE_KIND_COMPANY_PEOPLES):
         name = (src.get("company") or "").strip().lower()
         if name and name not in by_company:
             by_company[name] = src["id"]
-
-    updated = 0
-    for path in profiles_dir.glob("*.json"):
-        try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if (doc.get("source_id") or "").strip():
-            continue
-        company = (doc.get("source_company") or "").strip().lower()
-        sid = by_company.get(company)
-        if not sid:
-            continue
-        doc["source_id"] = sid
-        path.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
-        updated += 1
-    return updated
+    return backfill_source_ids(by_company)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _scheduler
+    try:
+        path = init_db()
+        logger.info("Database ready: %s", path)
+    except Exception:
+        logger.exception("Database init failed")
+        raise
+
     try:
         n = _backfill_profile_source_ids()
         if n:

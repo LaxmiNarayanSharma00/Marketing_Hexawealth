@@ -1,4 +1,4 @@
-"""File-backed automation schedule mappings.
+"""SQLite-backed automation schedule mappings.
 
 Supports:
   - company_people_fetch / build_connection: session → source, max, daily time
@@ -7,14 +7,11 @@ Supports:
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "schedules"
+from db import dumps, ensure_db, get_db, loads, now
 
 KIND_COMPANY_PEOPLE = "company_people_fetch"
 KIND_BUILD_CONNECTION = "build_connection"
@@ -23,26 +20,40 @@ KIND_BRAND_ENGAGE = "brand_engage"
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def ensure_dir() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _path(schedule_id: str) -> Path:
-    return DATA_DIR / f"{schedule_id}.json"
+    ensure_db()
 
 
 def normalize_run_time(value: str) -> str:
     raw = (value or "").strip()
-    # Browsers may send HH:MM:SS from <input type="time">.
     if len(raw) >= 8 and raw[2] == ":" and raw[5] == ":":
         raw = raw[:5]
     if not _TIME_RE.match(raw):
         raise ValueError("run_time must be HH:MM in 24-hour local time")
     return raw
+
+
+def _row_to_doc(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "kind": row["kind"],
+        "session_name": row["session_name"] or "",
+        "source_id": row["source_id"] or "",
+        "company": row["company"] or "",
+        "source_link": row["source_link"] or "",
+        "max_profiles": int(row["max_profiles"] or 0),
+        "source_ids": loads(row["source_ids"], []),
+        "actions": loads(row["actions"], []),
+        "run_time": row["run_time"] or "09:00",
+        "enabled": bool(row["enabled"]),
+        "last_run_at": row["last_run_at"],
+        "last_run_id": row["last_run_id"],
+        "last_run_status": row["last_run_status"],
+        "last_error": row["last_error"],
+        "fired_on_date": row["fired_on_date"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 def public_view(doc: dict[str, Any]) -> dict[str, Any]:
@@ -69,22 +80,27 @@ def public_view(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_schedules(*, kind: str | None = None) -> list[dict[str, Any]]:
-    ensure_dir()
-    rows: list[dict[str, Any]] = []
-    for path in sorted(DATA_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime):
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        if kind and doc.get("kind") != kind:
-            continue
-        rows.append(public_view(doc))
-    rows.reverse()
-    return rows
+    ensure_db()
+    with get_db() as conn:
+        if kind:
+            rows = conn.execute(
+                "SELECT * FROM schedules WHERE kind = ? ORDER BY created_at DESC",
+                (kind,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM schedules ORDER BY created_at DESC"
+            ).fetchall()
+    return [public_view(_row_to_doc(r)) for r in rows]
 
 
 def get_schedule(schedule_id: str) -> dict[str, Any] | None:
-    path = _path(schedule_id)
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    ensure_db()
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM schedules WHERE id = ?", (schedule_id,)
+        ).fetchone()
+    return _row_to_doc(row) if row else None
 
 
 def get_schedule_public(schedule_id: str) -> dict[str, Any] | None:
@@ -105,13 +121,14 @@ def create_schedule(
     source_ids: list[str] | None = None,
     actions: list[str] | None = None,
 ) -> dict[str, Any]:
-    ensure_dir()
+    ensure_db()
     if kind == KIND_BRAND_ENGAGE:
         max_profiles = 0
     elif max_profiles < 1 or max_profiles > 100:
         raise ValueError("max_profiles must be between 1 and 100")
     run_time = normalize_run_time(run_time)
     schedule_id = str(uuid.uuid4())
+    ts = now()
     doc = {
         "id": schedule_id,
         "kind": kind,
@@ -129,32 +146,100 @@ def create_schedule(
         "last_run_status": None,
         "last_error": None,
         "fired_on_date": None,
-        "created_at": _now(),
-        "updated_at": _now(),
+        "created_at": ts,
+        "updated_at": ts,
     }
-    _path(schedule_id).write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO schedules(
+                id, kind, session_name, source_id, company, source_link, max_profiles,
+                source_ids, actions, run_time, enabled, last_run_at, last_run_id,
+                last_run_status, last_error, fired_on_date, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)
+            """,
+            (
+                schedule_id,
+                kind,
+                session_name,
+                source_id,
+                company,
+                source_link,
+                max_profiles,
+                dumps(doc["source_ids"]),
+                dumps(doc["actions"]),
+                run_time,
+                1 if enabled else 0,
+                ts,
+                ts,
+            ),
+        )
     return public_view(doc)
 
 
 def update_schedule(schedule_id: str, **fields: Any) -> dict[str, Any] | None:
-    doc = get_schedule(schedule_id)
-    if not doc:
-        return None
+    ensure_db()
     if "run_time" in fields and fields["run_time"] is not None:
         fields["run_time"] = normalize_run_time(str(fields["run_time"]))
-    if "max_profiles" in fields and fields["max_profiles"] is not None:
-        n = int(fields["max_profiles"])
-        if doc.get("kind") != KIND_BRAND_ENGAGE and (n < 1 or n > 100):
-            raise ValueError("max_profiles must be between 1 and 100")
-        fields["max_profiles"] = n
-    if "source_ids" in fields and fields["source_ids"] is not None:
-        fields["source_ids"] = list(fields["source_ids"])
-    if "actions" in fields and fields["actions"] is not None:
-        fields["actions"] = list(fields["actions"])
-    doc.update(fields)
-    doc["updated_at"] = _now()
-    _path(schedule_id).write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    return public_view(doc)
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM schedules WHERE id = ?", (schedule_id,)
+        ).fetchone()
+        if not row:
+            return None
+        doc = _row_to_doc(row)
+        if "max_profiles" in fields and fields["max_profiles"] is not None:
+            n = int(fields["max_profiles"])
+            if doc.get("kind") != KIND_BRAND_ENGAGE and (n < 1 or n > 100):
+                raise ValueError("max_profiles must be between 1 and 100")
+            fields["max_profiles"] = n
+        if "source_ids" in fields and fields["source_ids"] is not None:
+            fields["source_ids"] = list(fields["source_ids"])
+        if "actions" in fields and fields["actions"] is not None:
+            fields["actions"] = list(fields["actions"])
+
+        allowed = {
+            "kind",
+            "session_name",
+            "source_id",
+            "company",
+            "source_link",
+            "max_profiles",
+            "source_ids",
+            "actions",
+            "run_time",
+            "enabled",
+            "last_run_at",
+            "last_run_id",
+            "last_run_status",
+            "last_error",
+            "fired_on_date",
+        }
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        cols: list[str] = []
+        vals: list[Any] = []
+        for key, value in updates.items():
+            if key in ("source_ids", "actions"):
+                cols.append(f"{key} = ?")
+                vals.append(dumps(value if value is not None else []))
+            elif key == "enabled":
+                cols.append("enabled = ?")
+                vals.append(1 if value else 0)
+            else:
+                cols.append(f"{key} = ?")
+                vals.append(value)
+        ts = now()
+        cols.append("updated_at = ?")
+        vals.append(ts)
+        vals.append(schedule_id)
+        conn.execute(
+            f"UPDATE schedules SET {', '.join(cols)} WHERE id = ?",
+            vals,
+        )
+        row = conn.execute(
+            "SELECT * FROM schedules WHERE id = ?", (schedule_id,)
+        ).fetchone()
+        return public_view(_row_to_doc(row))
 
 
 def set_enabled(schedule_id: str, enabled: bool) -> dict[str, Any] | None:
@@ -162,11 +247,10 @@ def set_enabled(schedule_id: str, enabled: bool) -> dict[str, Any] | None:
 
 
 def delete_schedule(schedule_id: str) -> bool:
-    path = _path(schedule_id)
-    if not path.exists():
-        return False
-    path.unlink()
-    return True
+    ensure_db()
+    with get_db() as conn:
+        cur = conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+        return cur.rowcount > 0
 
 
 def mark_fired(
@@ -179,7 +263,7 @@ def mark_fired(
     return update_schedule(
         schedule_id,
         fired_on_date=local_date,
-        last_run_at=_now(),
+        last_run_at=now(),
         last_run_id=run_id,
         last_run_status="pending",
         last_error=None,

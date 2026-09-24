@@ -6,7 +6,9 @@ Phase 1: create named LinkedIn sessions, log in manually once, store cookies for
 
 - **Backend:** FastAPI + Playwright (headed Chromium)
 - **Frontend:** React + Vite
-- **Storage:** JSON files under `data/sessions/` (Playwright `storage_state`)
+- **Storage:** SQLite (`data/hexawealth.db` by default). Override with `HEXAWEALTH_DB_PATH`
+  (on the VPS prefer `/var/lib/hexawealth/app.db` so `rsync` deploys never wipe data).
+  Existing JSON under `data/` is imported automatically on first start.
 
 ## Setup
 
@@ -120,5 +122,6 @@ Open http://127.0.0.1:5173
 | `link` | `https://www.linkedin.com/in/username/` |
 | `use_case` | `reach_out` |
 
-Saved state lives at `data/sessions/{name}.json`, `data/sources/{id}.json`,
-and schedule mappings at `data/schedules/{id}.json`.
+All durable state (sessions + cookies, sources, schedules, runs/logs, profiles,
+engagements) lives in SQLite. Legacy JSON folders under `data/` are only used
+for one-time migration.

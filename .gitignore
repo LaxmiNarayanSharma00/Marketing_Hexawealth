@@ -26,6 +26,11 @@ data/engagements/*.json
 data/schedules/*.json
 !data/schedules/.gitkeep
 
+# SQLite (sessions/cookies + all durable state — never commit)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
 # Env / OS
 .env
 .DS_Store
