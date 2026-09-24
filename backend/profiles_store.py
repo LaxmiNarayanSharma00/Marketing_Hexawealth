@@ -92,6 +92,7 @@ def save_profile(profile: dict[str, Any]) -> dict[str, Any]:
 
 
 def public_view(doc: dict[str, Any]) -> dict[str, Any]:
+    audience = doc.get("source_company") or ""
     return {
         "id": doc.get("id"),
         "linkedin_url": doc.get("linkedin_url"),
@@ -106,7 +107,10 @@ def public_view(doc: dict[str, Any]) -> dict[str, Any]:
         "contacts": doc.get("contacts") or [],
         "interests": doc.get("interests") or [],
         "accomplishments": doc.get("accomplishments") or [],
-        "source_company": doc.get("source_company"),
+        # Audience = Company Peoples source that fetched this profile.
+        "audience": audience,
+        "source_company": audience,
+        "source_id": doc.get("source_id") or "",
         "automation_id": doc.get("automation_id"),
         "session_name": doc.get("session_name"),
         "connection_status": doc.get("connection_status") or "none",
@@ -120,13 +124,22 @@ def public_view(doc: dict[str, Any]) -> dict[str, Any]:
 def list_profiles(
     *,
     source_company: str | None = None,
+    source_id: str | None = None,
     automation_id: str | None = None,
 ) -> list[dict[str, Any]]:
     ensure_dir()
     rows: list[dict[str, Any]] = []
     for path in sorted(DATA_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime):
         doc = json.loads(path.read_text(encoding="utf-8"))
-        if source_company and (doc.get("source_company") or "").lower() != source_company.lower():
+        if source_id and not _matches_audience(
+            doc, source_id=source_id, source_company=source_company
+        ):
+            continue
+        if (
+            not source_id
+            and source_company
+            and (doc.get("source_company") or "").lower() != source_company.lower()
+        ):
             continue
         if automation_id and doc.get("automation_id") != automation_id:
             continue
@@ -135,8 +148,39 @@ def list_profiles(
     return rows
 
 
-def list_profiles_for_connect(*, limit: int = 10) -> list[dict[str, Any]]:
-    """Profiles that have not yet been sent a connection request."""
+def _matches_audience(
+    doc: dict[str, Any],
+    *,
+    source_id: str | None = None,
+    source_company: str | None = None,
+) -> bool:
+    """Match by source_id when present; fall back to source_company for older profiles."""
+    if not source_id and not source_company:
+        return True
+    doc_sid = (doc.get("source_id") or "").strip()
+    doc_company = (doc.get("source_company") or "").strip()
+    if source_id and doc_sid:
+        return doc_sid == source_id
+    if source_id and source_company:
+        return doc_company.lower() == source_company.lower()
+    if source_id:
+        return False
+    if source_company:
+        return doc_company.lower() == source_company.lower()
+    return True
+
+
+def list_profiles_for_connect(
+    *,
+    limit: int = 10,
+    source_id: str | None = None,
+    source_company: str | None = None,
+) -> list[dict[str, Any]]:
+    """Profiles that have not yet been sent a connection request.
+
+    When source_id / source_company is set, only that audience (fetched from that
+    Company Peoples source) is considered.
+    """
     ensure_dir()
     skip = {"pending", "connected", "sent", "self"}
     rows: list[dict[str, Any]] = []
@@ -147,9 +191,68 @@ def list_profiles_for_connect(*, limit: int = 10) -> list[dict[str, Any]]:
             continue
         if not (doc.get("linkedin_url") or "").strip():
             continue
+        if not _matches_audience(
+            doc, source_id=source_id, source_company=source_company
+        ):
+            continue
         rows.append(public_view(doc))
         if len(rows) >= limit:
             break
+    return rows
+
+
+def count_eligible_for_connect(
+    *,
+    source_id: str | None = None,
+    source_company: str | None = None,
+) -> int:
+    return len(
+        list_profiles_for_connect(
+            limit=10_000,
+            source_id=source_id,
+            source_company=source_company,
+        )
+    )
+
+
+def list_audiences() -> list[dict[str, Any]]:
+    """Distinct fetch audiences from stored profiles (for Build Connection UI)."""
+    ensure_dir()
+    # key -> {source_id, company, total, eligible}
+    buckets: dict[str, dict[str, Any]] = {}
+    skip = {"pending", "connected", "sent", "self"}
+    for path in DATA_DIR.glob("*.json"):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        company = (doc.get("source_company") or "").strip()
+        sid = (doc.get("source_id") or "").strip()
+        if not company and not sid:
+            continue
+        key = sid or f"name:{company.lower()}"
+        bucket = buckets.setdefault(
+            key,
+            {
+                "source_id": sid,
+                "company": company,
+                "audience": company,
+                "total": 0,
+                "eligible": 0,
+            },
+        )
+        if company and not bucket["company"]:
+            bucket["company"] = company
+            bucket["audience"] = company
+        if sid and not bucket["source_id"]:
+            bucket["source_id"] = sid
+        bucket["total"] += 1
+        status = (doc.get("connection_status") or "none").lower()
+        if status not in skip and (doc.get("linkedin_url") or "").strip():
+            bucket["eligible"] += 1
+
+    rows = list(buckets.values())
+    rows.sort(key=lambda r: (r.get("company") or "").lower())
     return rows
 
 

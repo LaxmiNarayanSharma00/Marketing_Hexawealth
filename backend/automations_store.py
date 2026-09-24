@@ -42,6 +42,8 @@ def public_view(doc: dict[str, Any]) -> dict[str, Any]:
         "company": doc.get("company", ""),
         "source_id": doc.get("source_id", ""),
         "source_link": doc.get("source_link", ""),
+        "schedule_id": doc.get("schedule_id") or None,
+        "trigger": doc.get("trigger") or "manual",
         "max_connections": doc.get("max_connections", 0),
         "max_requests": doc.get("max_requests")
         if doc.get("max_requests") is not None
@@ -88,6 +90,8 @@ def create_run(
     company: str = "",
     source_id: str = "",
     source_link: str = "",
+    schedule_id: str | None = None,
+    trigger: str = "manual",
 ) -> dict[str, Any]:
     ensure_dir()
     run_id = str(uuid.uuid4())
@@ -99,6 +103,8 @@ def create_run(
         "company": company,
         "source_id": source_id,
         "source_link": source_link,
+        "schedule_id": schedule_id,
+        "trigger": trigger or "manual",
         "max_connections": max_connections or req,
         "max_requests": req,
         "status": "pending",

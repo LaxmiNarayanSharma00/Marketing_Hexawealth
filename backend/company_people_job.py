@@ -105,6 +105,7 @@ async def run_company_people_fetch(
     company: str,
     source_link: str,
     max_connections: int,
+    source_id: str = "",
     headless: bool = False,
 ) -> dict[str, Any]:
     async def log(msg: str) -> None:
@@ -173,6 +174,7 @@ async def run_company_people_fetch(
                             person,
                             meta={
                                 "source_company": company,
+                                "source_id": source_id,
                                 "automation_id": run_id,
                                 "session_name": session_name,
                             },

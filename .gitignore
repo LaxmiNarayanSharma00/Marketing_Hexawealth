@@ -16,13 +16,15 @@ data/sessions/*.json
 data/sources/*.json
 !data/sources/.gitkeep
 
-# Automations + profiles + engagements
+# Automations + profiles + engagements + schedules
 data/automations/*.json
 !data/automations/.gitkeep
 data/profiles/*.json
 !data/profiles/.gitkeep
 data/engagements/*.json
 !data/engagements/.gitkeep
+data/schedules/*.json
+!data/schedules/.gitkeep
 
 # Env / OS
 .env

@@ -25,18 +25,25 @@ npm install
 
 ## Run
 
-Terminal 1 — API (port 8000):
+Terminal 1 — API (port 8000). For **scheduled** automations, prefer without
+`--reload` so the in-process scheduler is not restarted on file changes:
 
 ```bash
 cd backend
 source .venv/bin/activate
+uvicorn main:app --port 8000
+```
+
+Dev with hot-reload (manual Activate still works; scheduler restarts on save):
+
+```bash
 uvicorn main:app --reload --port 8000
 ```
 
 Terminal 2 — UI (port 5173):
 
 ```bash
-cd frontend
+cd ../frontend
 npm run dev
 ```
 
@@ -51,8 +58,10 @@ Open http://127.0.0.1:5173
 5. Session shows “Logged in” and is ready for later phases
 6. Open **Sources** → add Company Peoples URLs like
    `https://www.linkedin.com/company/google/people/`
-7. Open **Automations** → Type 1 Company People Fetch: pick a logged-in
-   session, company source, max connections → **Activate**
+7. Open **Automations** → Type 1 Company People Fetch:
+   - **Manual** — pick session, company source, max → **Activate**
+   - **Schedule** — add session→source mappings with daily local time,
+     profile count, and Pause/Start; the API process fires them automatically
 
 ## API
 
@@ -72,6 +81,15 @@ Open http://127.0.0.1:5173
 | GET | `/api/automations` | List automation runs |
 | GET | `/api/automations/{id}` | Poll run status / logs |
 | GET | `/api/profiles` | List scraped profiles |
+| GET | `/api/schedules` | List schedule mappings |
+| POST | `/api/schedules/company-people` | Create Type 1 daily schedule |
+| POST | `/api/schedules/brand-engage` | Create Type 3 daily schedule |
+| PATCH | `/api/schedules/{id}` | Update mapping |
+| POST | `/api/schedules/{id}/start` | Enable mapping |
+| POST | `/api/schedules/{id}/pause` | Pause mapping |
+| DELETE | `/api/schedules/{id}` | Remove mapping |
+| GET | `/api/audiences` | Audiences for Build Connection |
+| GET | `/api/brand-sources` | Fixed brand audiences + actions |
 
 ### Source models
 
@@ -102,4 +120,5 @@ Open http://127.0.0.1:5173
 | `link` | `https://www.linkedin.com/in/username/` |
 | `use_case` | `reach_out` |
 
-Saved state lives at `data/sessions/{name}.json` and `data/sources/{id}.json`.
+Saved state lives at `data/sessions/{name}.json`, `data/sources/{id}.json`,
+and schedule mappings at `data/schedules/{id}.json`.

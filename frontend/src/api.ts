@@ -35,6 +35,8 @@ export type AutomationRun = {
   company: string
   source_id: string
   source_link: string
+  schedule_id?: string | null
+  trigger?: 'manual' | 'schedule' | string
   max_connections: number
   max_requests?: number
   status: string
@@ -57,6 +59,33 @@ export type AutomationRun = {
   updated_at?: string
 }
 
+export type Schedule = {
+  id: string
+  kind: string
+  session_name: string
+  source_id: string
+  company: string
+  source_link: string
+  max_profiles: number
+  source_ids?: string[]
+  actions?: string[]
+  run_time: string
+  enabled: boolean
+  last_run_at?: string | null
+  last_run_id?: string | null
+  last_run_status?: string | null
+  last_error?: string | null
+  fired_on_date?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export type BrandSource = {
+  id: string
+  label: string
+  url: string
+}
+
 export type Profile = {
   id: string
   linkedin_url: string
@@ -68,13 +97,24 @@ export type Profile = {
   open_to_work?: boolean
   experiences?: unknown[]
   educations?: unknown[]
+  audience?: string
   source_company?: string
+  source_id?: string
   automation_id?: string
   session_name?: string
   connection_status?: string
   connection_note?: string
   created_at?: string
   updated_at?: string
+}
+
+export type Audience = {
+  source_id: string
+  company: string
+  audience: string
+  source_link: string
+  eligible: number
+  total: number
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -174,24 +214,105 @@ export const api = {
     }),
   activateBuildConnection: (body: {
     session_name: string
+    source_id: string
     max_requests: number
   }) =>
     request<AutomationRun>('/api/automations/build-connection', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  activateBrandEngage: () =>
+  activateBrandEngage: (body: {
+    session_name: string
+    source_ids?: string[]
+    actions?: string[]
+  }) =>
     request<AutomationRun>('/api/automations/brand-engage', {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify(body),
     }),
-  listProfiles: (opts?: { source_company?: string; automation_id?: string }) => {
+  listBrandSources: () =>
+    request<{ sources: BrandSource[]; actions: string[] }>(
+      '/api/brand-sources',
+    ),
+  listProfiles: (opts?: {
+    source_company?: string
+    source_id?: string
+    automation_id?: string
+  }) => {
     const params = new URLSearchParams()
     if (opts?.source_company) params.set('source_company', opts.source_company)
+    if (opts?.source_id) params.set('source_id', opts.source_id)
     if (opts?.automation_id) params.set('automation_id', opts.automation_id)
     const q = params.toString() ? `?${params}` : ''
     return request<{ profiles: Profile[] }>(`/api/profiles${q}`)
   },
+  listAudiences: () => request<{ audiences: Audience[] }>('/api/audiences'),
+
+  listSchedules: (kind?: string) => {
+    const q = kind ? `?kind=${encodeURIComponent(kind)}` : ''
+    return request<{ schedules: Schedule[] }>(`/api/schedules${q}`)
+  },
+  createCompanyPeopleSchedule: (body: {
+    session_name: string
+    source_id: string
+    max_profiles: number
+    run_time: string
+    enabled?: boolean
+  }) =>
+    request<Schedule>('/api/schedules/company-people', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  createBuildConnectionSchedule: (body: {
+    session_name: string
+    source_id: string
+    max_profiles: number
+    run_time: string
+    enabled?: boolean
+  }) =>
+    request<Schedule>('/api/schedules/build-connection', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  createBrandEngageSchedule: (body: {
+    session_name: string
+    source_ids: string[]
+    actions: string[]
+    run_time: string
+    enabled?: boolean
+  }) =>
+    request<Schedule>('/api/schedules/brand-engage', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateSchedule: (
+    id: string,
+    body: {
+      session_name?: string
+      source_id?: string
+      max_profiles?: number
+      run_time?: string
+      enabled?: boolean
+      source_ids?: string[]
+      actions?: string[]
+    },
+  ) =>
+    request<Schedule>(`/api/schedules/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  startSchedule: (id: string) =>
+    request<Schedule>(`/api/schedules/${encodeURIComponent(id)}/start`, {
+      method: 'POST',
+    }),
+  pauseSchedule: (id: string) =>
+    request<Schedule>(`/api/schedules/${encodeURIComponent(id)}/pause`, {
+      method: 'POST',
+    }),
+  deleteSchedule: (id: string) =>
+    request<{ ok: boolean }>(`/api/schedules/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
 }
 
 export async function pollLogin(

@@ -27,6 +27,8 @@ async def run_build_connection(
     run_id: str,
     session_name: str,
     max_requests: int,
+    source_id: str = "",
+    source_company: str = "",
     headless: bool = False,
 ) -> dict[str, Any]:
     async def log(msg: str) -> None:
@@ -35,10 +37,17 @@ async def run_build_connection(
 
     update_run(run_id, status="running", error=None)
     await log("Starting Build Connection")
-    await log(f"Session={session_name} · max_requests={max_requests}")
+    audience_label = source_company or source_id or "all audiences"
+    await log(
+        f"Session={session_name} · max_requests={max_requests} · audience={audience_label}"
+    )
 
     # Fetch extra candidates so self / already-handled ones don't shrink the batch.
-    pool = list_profiles_for_connect(limit=max(max_requests * 3, max_requests + 5))
+    pool = list_profiles_for_connect(
+        limit=max(max_requests * 3, max_requests + 5),
+        source_id=source_id or None,
+        source_company=source_company or None,
+    )
     await log(f"Loaded {len(pool)} candidate profile(s) from store")
 
     storage = load_storage_state(session_name)

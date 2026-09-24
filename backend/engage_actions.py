@@ -1021,77 +1021,159 @@ async def _do_comment(
 
 
 async def _do_repost(page: Page, card: Locator) -> tuple[bool, str]:
+    """Open the Repost menu, then click **Repost instantly** (not 'with thoughts').
+
+    LinkedIn's bar button only opens a menu; treating that click as success is a
+    false positive. We must select the instant option from the dropdown.
+    """
     repost = await _first_in(card, REPOST_SELECTORS)
     if repost is None:
         handle = await card.element_handle()
-        if handle:
-            found = await page.evaluate(
-                """(card) => {
-                  const bar = card.querySelector(
-                    '.feed-shared-social-action-bar, .feed-shared-social-actions'
-                  ) || card;
-                  const b = [...bar.querySelectorAll('button')].find(el => {
-                    const t = (el.getAttribute('aria-label') || el.innerText || '').toLowerCase();
-                    return t.includes('repost') || t.includes('reshare') || el.className.includes('social-reshare');
-                  });
-                  if (b) { b.click(); return true; }
-                  return false;
-                }""",
-                handle,
-            )
-            if not found:
-                return False, "Repost button not found"
-        else:
+        if not handle:
+            return False, "Repost button not found"
+        found = await page.evaluate(
+            """(card) => {
+              const bar = card.querySelector(
+                '.feed-shared-social-action-bar, .feed-shared-social-actions, .update-v2-social-activity'
+              ) || card;
+              const b = [...bar.querySelectorAll('button')].find(el => {
+                const t = (el.getAttribute('aria-label') || el.innerText || '').toLowerCase();
+                return t.includes('repost') || t.includes('reshare') || (el.className || '').includes('social-reshare');
+              });
+              if (b) { b.click(); return true; }
+              return false;
+            }""",
+            handle,
+        )
+        if not found:
             return False, "Repost button not found"
     else:
         if not await _js_click(page, repost):
             return False, "Failed to click Repost"
 
-    await _pause(0.6, 1.0)
+    await _pause(0.7, 1.2)
 
-    # Instant repost — avoid "with your thoughts" (LAF FeedActionSelectors)
-    for sel in (
-        'div.artdeco-dropdown__content button:has-text("Repost"):not(:has-text("thought"))',
-        'div[role="menu"] >> text=/^Repost$/i',
-        '[role="menuitem"]:has-text("Repost")',
-        'div.social-reshare-button__share-dropdown-content button:has-text("Repost")',
-    ):
+    # Prefer explicit "Repost instantly" (current LinkedIn menu copy).
+    instant_selectors = (
+        '[role="menuitem"]:has-text("Repost instantly")',
+        '[role="menu"] >> text=/Repost instantly/i',
+        'div.artdeco-dropdown__content >> text=/Repost instantly/i',
+        'div.social-reshare-button__share-dropdown-content >> text=/Repost instantly/i',
+        'button:has-text("Repost instantly")',
+        'div[role="button"]:has-text("Repost instantly")',
+    )
+    for sel in instant_selectors:
         opt = page.locator(sel).first
         try:
-            if await opt.count() > 0 and await opt.is_visible(timeout=800):
-                label = ((await opt.inner_text(timeout=500)) or "").lower()
-                if "thought" in label:
-                    continue
-                await _js_click(page, opt)
-                await _pause(0.8, 1.3)
-                return True, "reposted"
+            if await opt.count() == 0:
+                continue
+            if not await opt.is_visible(timeout=1200):
+                continue
+            label = ((await opt.inner_text(timeout=500)) or "").lower()
+            if "thought" in label:
+                continue
+            # Must be "Repost instantly" (or legacy exact "Repost" menu item).
+            if "instant" not in label and not re.fullmatch(r"repost", label.strip()):
+                continue
+            if not await _js_click(page, opt):
+                continue
+            await _pause(0.9, 1.5)
+            # Menu should close after a real instant repost.
+            still_open = await page.evaluate(
+                """() => {
+                  const menus = [...document.querySelectorAll(
+                    '[role="menu"], .artdeco-dropdown__content, .social-reshare-button__share-dropdown-content'
+                  )];
+                  return menus.some((m) => {
+                    const t = (m.innerText || '');
+                    return /repost instantly/i.test(t) || /repost with thoughts/i.test(t);
+                  });
+                }"""
+            )
+            if still_open:
+                return False, "Repost menu still open after click"
+            return True, "reposted instantly"
         except Exception:
             continue
 
+    # Scoped JS: only options inside an open share/repost menu — never the bar button.
     instant = await page.evaluate(
         """() => {
-          const nodes = [...document.querySelectorAll(
-            '[role="menuitem"], [role="menu"] button, [role="menu"] [role="button"], div[role="menu"] span, button'
-          )];
-          const item = nodes.find((el) => {
-            const text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-            const label = (el.getAttribute('aria-label') || '').trim();
-            if (/thought/i.test(text) || /thought/i.test(label)) return false;
-            return /^repost$/i.test(text) || /^repost$/i.test(label);
+          const menus = [...document.querySelectorAll(
+            '[role="menu"], .artdeco-dropdown__content-inner, .artdeco-dropdown__content, .social-reshare-button__share-dropdown-content, .artdeco-dropdown__item'
+          )].filter((m) => {
+            const style = window.getComputedStyle(m);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            const t = (m.innerText || '');
+            return /repost/i.test(t);
           });
-          if (!item) return false;
+          const roots = menus.length ? menus : [];
+          const candidates = [];
+          for (const root of roots) {
+            candidates.push(
+              ...root.querySelectorAll(
+                '[role="menuitem"], button, [role="button"], div[role="button"], li, span'
+              )
+            );
+          }
+          const normalize = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          // 1) Prefer "Repost instantly"
+          let item = candidates.find((el) => {
+            const text = normalize(el.innerText);
+            const label = normalize(el.getAttribute('aria-label'));
+            return text.includes('repost instantly') || label.includes('repost instantly');
+          });
+          // 2) Legacy: menu item whose text is exactly "Repost" (not thoughts, not bar)
+          if (!item) {
+            item = candidates.find((el) => {
+              const text = normalize(el.innerText);
+              const label = normalize(el.getAttribute('aria-label'));
+              if (text.includes('thought') || label.includes('thought')) return false;
+              return text === 'repost' || label === 'repost';
+            });
+          }
+          if (!item) return { ok: false, reason: 'instant_option_not_found' };
           item.click();
-          return true;
+          return { ok: true, reason: 'clicked' };
         }"""
     )
-    if instant:
-        await _pause(0.8, 1.3)
-        return True, "reposted"
-    return False, "Repost menu not found"
+    if isinstance(instant, dict) and instant.get("ok"):
+        await _pause(0.9, 1.5)
+        still_open = await page.evaluate(
+            """() => {
+              const menus = [...document.querySelectorAll(
+                '[role="menu"], .artdeco-dropdown__content, .social-reshare-button__share-dropdown-content'
+              )];
+              return menus.some((m) => {
+                const t = (m.innerText || '');
+                return /repost instantly/i.test(t) || /repost with thoughts/i.test(t);
+              });
+            }"""
+        )
+        if still_open:
+            return False, "Repost menu still open after click"
+        return True, "reposted instantly"
+
+    reason = (
+        instant.get("reason")
+        if isinstance(instant, dict)
+        else "instant_option_not_found"
+    )
+    return False, f"Repost instantly not selected ({reason})"
 
 
-async def engage_post(page: Page, post: LatestPost) -> EngageResult:
-    """Like → comment Insightful → repost on the card that owns the action bar."""
+async def engage_post(
+    page: Page,
+    post: LatestPost,
+    *,
+    actions: set[str] | None = None,
+) -> EngageResult:
+    """Run selected actions (like / comment / repost) on the post's action bar."""
+    wanted = {a.strip().lower() for a in (actions or {"like", "comment", "repost"})}
+    wanted &= {"like", "comment", "repost"}
+    if not wanted:
+        return EngageResult(False, "error", "No actions selected")
+
     card = await _card_for_post(page, post)
     if card is None and not post.post_urn.lower().startswith("sdui:"):
         main = page.locator(
@@ -1115,50 +1197,36 @@ async def engage_post(page: Page, post: LatestPost) -> EngageResult:
 
     liked = commented = reposted = False
     details: list[str] = []
+    failed = False
 
-    ok, detail = await _do_like(page, card)
-    liked = ok
-    details.append(f"like={detail}")
-    if not ok:
-        return EngageResult(
-            False, "error", "; ".join(details), liked=liked
-        )
-    await _pause(0.8, 1.4)
+    if "like" in wanted:
+        ok, detail = await _do_like(page, card)
+        liked = ok
+        details.append(f"like={detail}")
+        if not ok:
+            failed = True
+        await _pause(0.8, 1.4)
+        card = await _card_for_post(page, post) or card
 
-    # Re-find card after DOM refresh from like
-    card = await _card_for_post(page, post) or card
+    if "comment" in wanted:
+        ok, detail = await _do_comment(page, card, COMMENT_TEXT)
+        commented = ok
+        details.append(f"comment={detail}")
+        if not ok:
+            failed = True
+        await _pause(0.8, 1.4)
+        card = await _card_for_post(page, post) or card
 
-    ok, detail = await _do_comment(page, card, COMMENT_TEXT)
-    commented = ok
-    details.append(f"comment={detail}")
-    if not ok:
-        return EngageResult(
-            False,
-            "error",
-            "; ".join(details),
-            liked=liked,
-            commented=commented,
-        )
-    await _pause(0.8, 1.4)
-
-    card = await _card_for_post(page, post) or card
-
-    ok, detail = await _do_repost(page, card)
-    reposted = ok
-    details.append(f"repost={detail}")
-    if not ok:
-        return EngageResult(
-            False,
-            "error",
-            "; ".join(details),
-            liked=liked,
-            commented=commented,
-            reposted=reposted,
-        )
+    if "repost" in wanted:
+        ok, detail = await _do_repost(page, card)
+        reposted = ok
+        details.append(f"repost={detail}")
+        if not ok:
+            failed = True
 
     return EngageResult(
-        True,
-        "done",
+        not failed,
+        "done" if not failed else "error",
         "; ".join(details),
         liked=liked,
         commented=commented,
